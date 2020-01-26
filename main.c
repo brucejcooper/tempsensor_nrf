@@ -20,7 +20,7 @@
 #include "boards.h"
 #include "app_timer.h"
 #include "app_button.h"
-#include "ble_lbs.h"
+#include "ble_tmps.h"
 #include "nrf_ble_gatt.h"
 #include "nrf_ble_qwr.h"
 #include "nrf_pwr_mgmt.h"
@@ -29,36 +29,37 @@
 #include "nrf_log_ctrl.h"
 #include "nrf_log_default_backends.h"
 
+#include "tmp11x.h"
+
 
 #define ADVERTISING_LED                 BSP_BOARD_LED_0                         /**< Is on when device is advertising. */
 #define CONNECTED_LED                   BSP_BOARD_LED_1                         /**< Is on when device has connected. */
 #define LEDBUTTON_LED                   BSP_BOARD_LED_2                         /**< LED to be toggled with the help of the LED Button Service. */
-#define LEDBUTTON_BUTTON                BSP_BUTTON_0                            /**< Button that will trigger the notification event with the LED Button Service */
+#define TIMER_LED                       BSP_BOARD_LED_3
 
-#define DEVICE_NAME                     "CCPEED_TMP"                            /**< Name of device. Will be included in the advertising data. */
+#define DEVICE_NAME                     "CCPEED_TMP"                            /**< Name of  device. Will be included in the advertising data. */
+
 
 #define APP_BLE_OBSERVER_PRIO           3                                       /**< Application's BLE observer priority. You shouldn't need to modify this value. */
 #define APP_BLE_CONN_CFG_TAG            1                                       /**< A tag identifying the SoftDevice BLE configuration. */
 
-#define APP_ADV_INTERVAL                1600                                    /**< The advertising interval (in units of 0.625 ms; this value corresponds to 1 second). */
+#define APP_ADV_INTERVAL                MSEC_TO_UNITS(2000, UNIT_0_625_MS)      /**< The advertising interval (in units of 0.625 ms; this value corresponds to 1 second). */
 #define APP_ADV_DURATION                BLE_GAP_ADV_TIMEOUT_GENERAL_UNLIMITED   /**< The advertising time-out (in units of seconds). When set to 0, we will never time out. */
 
 
 #define MIN_CONN_INTERVAL               MSEC_TO_UNITS(100, UNIT_1_25_MS)        /**< Minimum acceptable connection interval (0.5 seconds). */
 #define MAX_CONN_INTERVAL               MSEC_TO_UNITS(400, UNIT_1_25_MS)        /**< Maximum acceptable connection interval (2 second). */
-#define SLAVE_LATENCY                   0                                       /**< Slave latency. */
-#define CONN_SUP_TIMEOUT                MSEC_TO_UNITS(4000, UNIT_10_MS)         /**< Connection supervisory time-out (4 seconds). */
+#define SLAVE_LATENCY                   9                                       /**< Slave latency. */
+#define CONN_SUP_TIMEOUT                MSEC_TO_UNITS(10000, UNIT_10_MS)        /**< Connection supervisory time-out (10 seconds). */
 
 #define FIRST_CONN_PARAMS_UPDATE_DELAY  APP_TIMER_TICKS(20000)                  /**< Time from initiating event (connect or start of notification) to first time sd_ble_gap_conn_param_update is called (15 seconds). */
 #define NEXT_CONN_PARAMS_UPDATE_DELAY   APP_TIMER_TICKS(5000)                   /**< Time between each call to sd_ble_gap_conn_param_update after the first call (5 seconds). */
 #define MAX_CONN_PARAMS_UPDATE_COUNT    3                                       /**< Number of attempts before giving up the connection parameter negotiation. */
 
-#define BUTTON_DETECTION_DELAY          APP_TIMER_TICKS(50)                     /**< Delay from a GPIOTE event until a button is reported as pushed (in number of timer ticks). */
-
 #define DEAD_BEEF                       0xDEADBEEF                              /**< Value used as error code on stack dump, can be used to identify stack location on stack unwind. */
+#define TIMER_DURATION                  APP_TIMER_TICKS(1000)                   /**< How often the timer to fetch temperature goes off, when connected. */
 
-
-BLE_LBS_DEF(m_lbs);                                                             /**< LED Button Service instance. */
+BLE_TMPS_DEF(m_tmps);                                                           /**< LED Button Service instance. */
 NRF_BLE_GATT_DEF(m_gatt);                                                       /**< GATT module instance. */
 NRF_BLE_QWR_DEF(m_qwr);                                                         /**< Context for the Queued Write module.*/
 
@@ -67,6 +68,8 @@ static uint16_t m_conn_handle = BLE_CONN_HANDLE_INVALID;                        
 static uint8_t m_adv_handle = BLE_GAP_ADV_SET_HANDLE_NOT_SET;                   /**< Advertising handle used to identify an advertising set. */
 static uint8_t m_enc_advdata[BLE_GAP_ADV_SET_DATA_SIZE_MAX];                    /**< Buffer for storing an encoded advertising set. */
 static uint8_t m_enc_scan_response_data[BLE_GAP_ADV_SET_DATA_SIZE_MAX];         /**< Buffer for storing an encoded scan data. */
+
+
 
 /**@brief Struct that contains pointers to the encoded advertising data. */
 static ble_gap_adv_data_t m_adv_data =
@@ -83,6 +86,47 @@ static ble_gap_adv_data_t m_adv_data =
 
     }
 };
+
+
+
+/**< Handler for repeated timer used to blink LED 1. */
+APP_TIMER_DEF(m_connected_timer_id);     
+
+
+
+
+
+static void connected_timer_handler(void * p_context)
+{
+    bsp_board_led_invert(TIMER_LED);
+
+    // Request the value of the current register (should be reg 0, which is the temperature). 
+    // The result will be deliverd to the callback. 
+    tmp11x_initiate_read();
+
+    // nrf_drv_twi_disable(&twi);
+
+}
+
+
+static void temperature_callback(float tmp) {
+    NRF_LOG_INFO("Current Temperature is %d", (int) (tmp*100));
+    static float lastTmp = -1E10;
+
+    // Only send a notify if the temperature has actually changed (which it probably will have)
+    if (tmp != lastTmp) {
+        ret_code_t err_code = ble_tmps_on_temp_change(m_conn_handle, &m_tmps, tmp);
+        if (err_code != NRF_SUCCESS &&
+            err_code != BLE_ERROR_INVALID_CONN_HANDLE &&
+            err_code != NRF_ERROR_INVALID_STATE &&
+            err_code != BLE_ERROR_GATTS_SYS_ATTR_MISSING)
+        {
+            APP_ERROR_CHECK(err_code);
+        }
+        lastTmp = tmp;
+    }
+}
+
 
 /**@brief Function for assert macro callback.
  *
@@ -119,6 +163,10 @@ static void timers_init(void)
 {
     // Initialize timer module, making it use the scheduler
     ret_code_t err_code = app_timer_init();
+    APP_ERROR_CHECK(err_code);
+
+    // Create timers
+    err_code = app_timer_create(&m_connected_timer_id, APP_TIMER_MODE_REPEATED, connected_timer_handler);
     APP_ERROR_CHECK(err_code);
 }
 
@@ -173,7 +221,7 @@ static void advertising_init(void)
     ble_advdata_t advdata;
     ble_advdata_t srdata;
 
-    ble_uuid_t adv_uuids[] = {{LBS_UUID_SERVICE, m_lbs.uuid_type}};
+    ble_uuid_t adv_uuids[] = {{TMPS_UUID_SERVICE, m_tmps.uuid_type}};
 
     // Build and set advertising data.
     memset(&advdata, 0, sizeof(advdata));
@@ -225,21 +273,12 @@ static void nrf_qwr_error_handler(uint32_t nrf_error)
 
 /**@brief Function for handling write events to the LED characteristic.
  *
- * @param[in] p_lbs     Instance of LED Button Service to which the write applies.
+ * @param[in] p_tmps     Instance of LED Button Service to which the write applies.
  * @param[in] led_state Written/desired state of the LED.
  */
-static void led_write_handler(uint16_t conn_handle, ble_lbs_t * p_lbs, uint8_t led_state)
+static void sample_period_write_handler(uint16_t conn_handle, ble_tmps_t * p_tmps, uint8_t sample_period)
 {
-    if (led_state)
-    {
-        bsp_board_led_on(LEDBUTTON_LED);
-        NRF_LOG_INFO("Received LED ON!");
-    }
-    else
-    {
-        bsp_board_led_off(LEDBUTTON_LED);
-        NRF_LOG_INFO("Received LED OFF!");
-    }
+    NRF_LOG_INFO("Sample period set to %d", sample_period);
 }
 
 
@@ -248,7 +287,7 @@ static void led_write_handler(uint16_t conn_handle, ble_lbs_t * p_lbs, uint8_t l
 static void services_init(void)
 {
     ret_code_t         err_code;
-    ble_lbs_init_t     init     = {0};
+    ble_tmps_init_t     init     = {0};
     nrf_ble_qwr_init_t qwr_init = {0};
 
     // Initialize Queued Write Module.
@@ -257,10 +296,10 @@ static void services_init(void)
     err_code = nrf_ble_qwr_init(&m_qwr, &qwr_init);
     APP_ERROR_CHECK(err_code);
 
-    // Initialize LBS.
-    init.led_write_handler = led_write_handler;
+    // Initialize TMPS.
+    init.sample_period_write_handler = sample_period_write_handler;
 
-    err_code = ble_lbs_init(&m_lbs, &init);
+    err_code = ble_tmps_init(&m_tmps, &init);
     APP_ERROR_CHECK(err_code);
 }
 
@@ -352,7 +391,8 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
             m_conn_handle = p_ble_evt->evt.gap_evt.conn_handle;
             err_code = nrf_ble_qwr_conn_handle_assign(&m_qwr, m_conn_handle);
             APP_ERROR_CHECK(err_code);
-            err_code = app_button_enable();
+
+            err_code = app_timer_start(m_connected_timer_id, TIMER_DURATION, NULL);
             APP_ERROR_CHECK(err_code);
             break;
 
@@ -360,9 +400,12 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
             NRF_LOG_INFO("Disconnected");
             bsp_board_led_off(CONNECTED_LED);
             m_conn_handle = BLE_CONN_HANDLE_INVALID;
-            err_code = app_button_disable();
-            APP_ERROR_CHECK(err_code);
             advertising_start();
+
+            // Stop the timer.
+            bsp_board_led_off(TIMER_LED);
+            err_code = app_timer_stop(m_connected_timer_id);
+            APP_ERROR_CHECK(err_code);
             break;
 
         case BLE_GAP_EVT_SEC_PARAMS_REQUEST:
@@ -441,53 +484,6 @@ static void ble_stack_init(void)
 }
 
 
-/**@brief Function for handling events from the button handler module.
- *
- * @param[in] pin_no        The pin that the event applies to.
- * @param[in] button_action The button action (press/release).
- */
-static void button_event_handler(uint8_t pin_no, uint8_t button_action)
-{
-    ret_code_t err_code;
-
-    switch (pin_no)
-    {
-        case LEDBUTTON_BUTTON:
-            NRF_LOG_INFO("Send button state change.");
-            err_code = ble_lbs_on_button_change(m_conn_handle, &m_lbs, button_action);
-            if (err_code != NRF_SUCCESS &&
-                err_code != BLE_ERROR_INVALID_CONN_HANDLE &&
-                err_code != NRF_ERROR_INVALID_STATE &&
-                err_code != BLE_ERROR_GATTS_SYS_ATTR_MISSING)
-            {
-                APP_ERROR_CHECK(err_code);
-            }
-            break;
-
-        default:
-            APP_ERROR_HANDLER(pin_no);
-            break;
-    }
-}
-
-
-/**@brief Function for initializing the button handler module.
- */
-static void buttons_init(void)
-{
-    ret_code_t err_code;
-
-    //The array must be static because a pointer to it will be saved in the button handler module.
-    static app_button_cfg_t buttons[] =
-    {
-        {LEDBUTTON_BUTTON, false, BUTTON_PULL, button_event_handler}
-    };
-
-    err_code = app_button_init(buttons, ARRAY_SIZE(buttons),
-                               BUTTON_DETECTION_DELAY);
-    APP_ERROR_CHECK(err_code);
-}
-
 
 static void log_init(void)
 {
@@ -500,8 +496,7 @@ static void log_init(void)
 
 /**@brief Function for initializing power management.
  */
-static void power_management_init(void)
-{
+static void power_management_init(void) {
     ret_code_t err_code;
     err_code = nrf_pwr_mgmt_init();
     APP_ERROR_CHECK(err_code);
@@ -512,8 +507,7 @@ static void power_management_init(void)
  *
  * @details If there is no pending log operation, then sleep until next the next event occurs.
  */
-static void idle_state_handle(void)
-{
+static void idle_state_handle(void) {
     if (NRF_LOG_PROCESS() == false)
     {
         nrf_pwr_mgmt_run();
@@ -523,13 +517,11 @@ static void idle_state_handle(void)
 
 /**@brief Function for application main entry.
  */
-int main(void)
-{
+int main(void) {
     // Initialize.
     log_init();
     leds_init();
     timers_init();
-    buttons_init();
     power_management_init();
     ble_stack_init();
     gap_params_init();
@@ -537,14 +529,15 @@ int main(void)
     services_init();
     advertising_init();
     conn_params_init();
+    tmp11x_init(temperature_callback);
 
     // Start execution.
     NRF_LOG_INFO("Temp sensor started.");
     advertising_start();
 
+
     // Enter main loop.
-    for (;;)
-    {
+    for (;;) {
         idle_state_handle();
     }
 }

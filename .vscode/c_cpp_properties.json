@@ -5,6 +5,7 @@
     },
     "configurations": [{
         "name": "NRF52833 DK",
+        "forcedInclude": ["pca10100/config/sdk_config.h"],
         "includePath": [
             "${nrf5SdkPath}/components/**",
             "${nrf5SdkPath}/components/nfc/ndef/generic/message",
