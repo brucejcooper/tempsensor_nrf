@@ -6,7 +6,7 @@ GROUP(-lgcc -lc -lnosys)
 MEMORY
 {
   FLASH (rx) : ORIGIN = 0x1c000, LENGTH = 0x64000
-  RAM (rwx) :  ORIGIN = 0x2000260c, LENGTH = 0x1d9f4
+  RAM (rwx) :  ORIGIN = 0x20006458, LENGTH = 0x19BA8
 }
 
 SECTIONS
@@ -26,6 +26,9 @@ SECTIONS
     PROVIDE(__stop_cli_sorted_cmd_ptrs = .);
   } > RAM
   .fs_data :
+
+
+  
   {
     PROVIDE(__start_fs_data = .);
     KEEP(*(.fs_data))

@@ -1,7 +1,7 @@
 /**
  * @brief Temperature sensor Application main file.
  *
- * This file contains the source code for a sample server application using the LED Button service.
+ * This file contains the source code for a sample server application using the Temperature service.
  */
 
 #include <stdint.h>
@@ -15,15 +15,20 @@
 #include "ble_srv_common.h"
 #include "ble_advdata.h"
 #include "ble_conn_params.h"
+#include "ble_conn_state.h"
 #include "nrf_sdh.h"
 #include "nrf_sdh_ble.h"
 #include "boards.h"
 #include "app_timer.h"
-#include "app_button.h"
 #include "ble_tmps.h"
+#include "ble_bas.h"
+#include "ble_dis.h"
 #include "nrf_ble_gatt.h"
 #include "nrf_ble_qwr.h"
 #include "nrf_pwr_mgmt.h"
+#include "inttypes.h"
+#include "device_config.h"
+#include "fds.h"
 
 #include "nrf_log.h"
 #include "nrf_log_ctrl.h"
@@ -32,25 +37,74 @@
 #include "tmp11x.h"
 
 
+#define CONFIG_FILE     (0x7E10)
+#define CONFIG_REC_KEY  (0x7E20)
+
+#define DEFAULT_DEVICE_NAME             "New Temp Sensor"
+#define MANUFACTURER_NAME               "CCPEED"                                /**< Manufacturer. Will be passed to Device Information Service. */
+#define MODEL_NUM                       "TMP002"                                /**< Model number. Will be passed to Device Information Service. */
+#define BUILD_NUM                       "1"
+#define HW_REV                          "1"
+#define MANUFACTURER_ID                 0x1122334455                            /**< Manufacturer ID, part of System ID. Will be passed to Device Information Service. */
+#define ORG_UNIQUE_ID                   0x667788                                /**< Organizational Unique ID, part of System ID. Will be passed to Device Information Service. */
+
+#define LINK_TOTAL                      NRF_SDH_BLE_PERIPHERAL_LINK_COUNT + \
+                                        NRF_SDH_BLE_CENTRAL_LINK_COUNT
+
+
+#define BATTERY_LEVEL_MEAS_INTERVAL     APP_TIMER_TICKS(10000)                       /**< Battery level measurement interval (ticks). */
+
+
 #define ADVERTISING_LED                 BSP_BOARD_LED_0                         /**< Is on when device is advertising. */
 #define CONNECTED_LED                   BSP_BOARD_LED_1                         /**< Is on when device has connected. */
-#define LEDBUTTON_LED                   BSP_BOARD_LED_2                         /**< LED to be toggled with the help of the LED Button Service. */
+#define LEDBUTTON_LED                   BSP_BOARD_LED_2                         /**< LED to be toggled with the help of the Temperature Service. */
 #define TIMER_LED                       BSP_BOARD_LED_3
-
-#define DEVICE_NAME                     "CCPEED_TMP"                            /**< Name of  device. Will be included in the advertising data. */
 
 
 #define APP_BLE_OBSERVER_PRIO           3                                       /**< Application's BLE observer priority. You shouldn't need to modify this value. */
 #define APP_BLE_CONN_CFG_TAG            1                                       /**< A tag identifying the SoftDevice BLE configuration. */
 
-#define APP_ADV_INTERVAL                MSEC_TO_UNITS(2000, UNIT_0_625_MS)      /**< The advertising interval (in units of 0.625 ms; this value corresponds to 1 second). */
+/**
+ * iOS has guidelines about BLE connection parameters (from https://developer.apple.com/accessories/Accessory-Design-Guidelines.pdf)
+ * The accessory should first use the recommended advertising interval of 20 ms for at least 30 seconds. If it is not discovered 
+ * within the initial 30 seconds, Apple recommends using one of the following longerintervals to increase chances of discovery 
+ * by the device:
+ * 
+ * * 152.5 ms
+ * * 211.25 ms
+ * * 318.75 ms
+ * * 417.5 ms
+ * * 546.25 ms
+ * * 760 ms
+ * * 852.5 ms
+ * * 1022.5 ms
+ * * 1285 ms 
+ * We want to maximise our battery life, and discovery isnt' that important, so we'll use the maximum value.
+ */
+
+#define APP_ADV_INTERVAL                MSEC_TO_UNITS(1285, UNIT_0_625_MS)      /**< The advertising interval (in units of 0.625 ms; this value corresponds to 2 seconds). */
 #define APP_ADV_DURATION                BLE_GAP_ADV_TIMEOUT_GENERAL_UNLIMITED   /**< The advertising time-out (in units of seconds). When set to 0, we will never time out. */
 
+/**
+ * Also from the iOS guidelines.
+ * The connection parameter request may be rejected if it does not comply with all of these rules:
+ * * Slave Latency ≤30
+ * * 2 seconds ≤ connSupervisionTimeout ≤ 6 seconds
+ * * Interval Min modulo 15 ms == 0
+ * * Interval Min ≥15 ms
+ * * One of the following:
+ *     * Interval Min + 15 ms ≤ Interval Max
+ *     * Interval Min == Interval Max == 15 ms
+ * * Interval Max * (Slave Latency + 1) ≤ 2 seconds
+ * * Interval Max * (Slave Latency + 1) * 3 < connSupervisionTimeout
+ * 
+ * Make sure all the values here comply. The last one in particular is important if large connection intervals are allowed.
+ */
 
-#define MIN_CONN_INTERVAL               MSEC_TO_UNITS(100, UNIT_1_25_MS)        /**< Minimum acceptable connection interval (0.5 seconds). */
-#define MAX_CONN_INTERVAL               MSEC_TO_UNITS(400, UNIT_1_25_MS)        /**< Maximum acceptable connection interval (2 second). */
-#define SLAVE_LATENCY                   9                                       /**< Slave latency. */
-#define CONN_SUP_TIMEOUT                MSEC_TO_UNITS(10000, UNIT_10_MS)        /**< Connection supervisory time-out (10 seconds). */
+#define MIN_CONN_INTERVAL               MSEC_TO_UNITS(105, UNIT_1_25_MS)        /**< Minimum acceptable connection interval (0.5 seconds). */
+#define MAX_CONN_INTERVAL               MSEC_TO_UNITS(330, UNIT_1_25_MS)        /**< Maximum acceptable connection interval (2 second). */
+#define SLAVE_LATENCY                   5                                       /**< Slave latency. */
+#define CONN_SUP_TIMEOUT                MSEC_TO_UNITS(6000, UNIT_10_MS)         /**< Connection supervisory time-out (10 seconds). */
 
 #define FIRST_CONN_PARAMS_UPDATE_DELAY  APP_TIMER_TICKS(20000)                  /**< Time from initiating event (connect or start of notification) to first time sd_ble_gap_conn_param_update is called (15 seconds). */
 #define NEXT_CONN_PARAMS_UPDATE_DELAY   APP_TIMER_TICKS(5000)                   /**< Time between each call to sd_ble_gap_conn_param_update after the first call (5 seconds). */
@@ -59,15 +113,35 @@
 #define DEAD_BEEF                       0xDEADBEEF                              /**< Value used as error code on stack dump, can be used to identify stack location on stack unwind. */
 #define TIMER_DURATION                  APP_TIMER_TICKS(1000)                   /**< How often the timer to fetch temperature goes off, when connected. */
 
-BLE_TMPS_DEF(m_tmps);                                                           /**< LED Button Service instance. */
+BLE_TMPS_DEF(m_tmps);                                                           /**< Temperature Service instance. */
+BLE_BAS_DEF(m_bas);                                                             /**< Structure used to identify the battery service. */
 NRF_BLE_GATT_DEF(m_gatt);                                                       /**< GATT module instance. */
-NRF_BLE_QWR_DEF(m_qwr);                                                         /**< Context for the Queued Write module.*/
-
-static uint16_t m_conn_handle = BLE_CONN_HANDLE_INVALID;                        /**< Handle of the current connection. */
+NRF_BLE_QWRS_DEF(m_qwr, NRF_SDH_BLE_TOTAL_LINK_COUNT);                          /**< Context for the Queued Write module.*/
 
 static uint8_t m_adv_handle = BLE_GAP_ADV_SET_HANDLE_NOT_SET;                   /**< Advertising handle used to identify an advertising set. */
 static uint8_t m_enc_advdata[BLE_GAP_ADV_SET_DATA_SIZE_MAX];                    /**< Buffer for storing an encoded advertising set. */
 static uint8_t m_enc_scan_response_data[BLE_GAP_ADV_SET_DATA_SIZE_MAX];         /**< Buffer for storing an encoded scan data. */
+
+
+static char const * fds_evt_str[] =
+{
+    "FDS_EVT_INIT",
+    "FDS_EVT_WRITE",
+    "FDS_EVT_UPDATE",
+    "FDS_EVT_DEL_RECORD",
+    "FDS_EVT_DEL_FILE",
+    "FDS_EVT_GC",
+};
+
+
+ccpeed_cfg_t ccpeed_cfg = {
+    .device_name = DEFAULT_DEVICE_NAME,
+    .sampling_period = 1,
+};
+
+
+
+static bool volatile m_fds_initialized;
 
 
 
@@ -91,8 +165,7 @@ static ble_gap_adv_data_t m_adv_data =
 
 /**< Handler for repeated timer used to blink LED 1. */
 APP_TIMER_DEF(m_connected_timer_id);     
-
-
+APP_TIMER_DEF(m_battery_timer_id);                                                  /**< Battery timer. */
 
 
 
@@ -110,18 +183,23 @@ static void connected_timer_handler(void * p_context)
 
 
 static void temperature_callback(float tmp) {
-    NRF_LOG_INFO("Current Temperature is %d", (int) (tmp*100));
+    // NRF_LOG_INFO("Current Temperature is %d", (int) (tmp*100));
     static float lastTmp = -1E10;
 
     // Only send a notify if the temperature has actually changed (which it probably will have)
     if (tmp != lastTmp) {
-        ret_code_t err_code = ble_tmps_on_temp_change(m_conn_handle, &m_tmps, tmp);
-        if (err_code != NRF_SUCCESS &&
-            err_code != BLE_ERROR_INVALID_CONN_HANDLE &&
-            err_code != NRF_ERROR_INVALID_STATE &&
-            err_code != BLE_ERROR_GATTS_SYS_ATTR_MISSING)
+        ble_conn_state_conn_handle_list_t conn_handles = ble_conn_state_periph_handles();
+
+        for (uint8_t i = 0; i < conn_handles.len; i++)
         {
-            APP_ERROR_CHECK(err_code);
+            ret_code_t err_code = ble_tmps_on_temp_change(conn_handles.conn_handles[i], &m_tmps, tmp);
+            if (err_code != NRF_SUCCESS &&
+                err_code != BLE_ERROR_INVALID_CONN_HANDLE &&
+                err_code != NRF_ERROR_INVALID_STATE &&
+                err_code != BLE_ERROR_GATTS_SYS_ATTR_MISSING)
+            {
+                APP_ERROR_CHECK(err_code);
+            }
         }
         lastTmp = tmp;
     }
@@ -155,21 +233,17 @@ static void leds_init(void)
 }
 
 
-/**@brief Function for the Timer initialization.
- *
- * @details Initializes the timer module.
- */
-static void timers_init(void)
-{
-    // Initialize timer module, making it use the scheduler
-    ret_code_t err_code = app_timer_init();
-    APP_ERROR_CHECK(err_code);
 
-    // Create timers
-    err_code = app_timer_create(&m_connected_timer_id, APP_TIMER_MODE_REPEATED, connected_timer_handler);
+/**@brief Function for starting application timers.
+ */
+static void application_timers_start(void)
+{
+    ret_code_t err_code;
+
+    // Start application timers.
+    err_code = app_timer_start(m_battery_timer_id, BATTERY_LEVEL_MEAS_INTERVAL, NULL);
     APP_ERROR_CHECK(err_code);
 }
-
 
 /**@brief Function for the GAP initialization.
  *
@@ -184,9 +258,7 @@ static void gap_params_init(void)
 
     BLE_GAP_CONN_SEC_MODE_SET_OPEN(&sec_mode);
 
-    err_code = sd_ble_gap_device_name_set(&sec_mode,
-                                          (const uint8_t *)DEVICE_NAME,
-                                          strlen(DEVICE_NAME));
+    err_code = sd_ble_gap_device_name_set(&sec_mode, (const uint8_t *)ccpeed_cfg.device_name, strlen(ccpeed_cfg.device_name));
     APP_ERROR_CHECK(err_code);
 
     memset(&gap_conn_params, 0, sizeof(gap_conn_params));
@@ -271,15 +343,200 @@ static void nrf_qwr_error_handler(uint32_t nrf_error)
 }
 
 
+
+/**@brief Function for performing a battery measurement, and update the Battery Level characteristic in the Battery Service.
+ */
+static void battery_level_update(void)
+{
+    ret_code_t err_code;
+    uint8_t  battery_level;
+
+    battery_level = (uint8_t) 95; // TODO actually get a real value from the board
+
+    err_code = ble_bas_battery_level_update(&m_bas, battery_level, BLE_CONN_HANDLE_ALL);
+    if ((err_code != NRF_SUCCESS) &&
+        (err_code != NRF_ERROR_INVALID_STATE) &&
+        (err_code != NRF_ERROR_RESOURCES) &&
+        (err_code != NRF_ERROR_BUSY) &&
+        (err_code != BLE_ERROR_GATTS_SYS_ATTR_MISSING)
+       )
+    {
+        APP_ERROR_HANDLER(err_code);
+    }
+}
+
+
+/**@brief Function for handling the Battery measurement timer timeout.
+ *
+ * @details This function will be called each time the battery level measurement timer expires.
+ *
+ * @param[in] p_context   Pointer used for passing some arbitrary information (context) from the
+ *                        app_start_timer() call to the timeout handler.
+ */
+static void battery_level_meas_timeout_handler(void * p_context)
+{
+    UNUSED_PARAMETER(p_context);
+    battery_level_update();
+}
+
+
+
+/**@brief Function for the Timer initialization.
+ *
+ * @details Initializes the timer module.
+ */
+static void timers_init(void)
+{
+    // Initialize timer module, making it use the scheduler
+    ret_code_t err_code = app_timer_init();
+    APP_ERROR_CHECK(err_code);
+
+    // Create timers
+    err_code = app_timer_create(&m_connected_timer_id, APP_TIMER_MODE_REPEATED, connected_timer_handler);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = app_timer_create(&m_battery_timer_id, APP_TIMER_MODE_REPEATED, battery_level_meas_timeout_handler);
+    APP_ERROR_CHECK(err_code);
+
+}
+
+
+
+const char *fds_err_str(ret_code_t ret)
+{
+    /* Array to map FDS return values to strings. */
+    static char const * err_str[] =
+    {
+        "FDS_ERR_OPERATION_TIMEOUT",
+        "FDS_ERR_NOT_INITIALIZED",
+        "FDS_ERR_UNALIGNED_ADDR",
+        "FDS_ERR_INVALID_ARG",
+        "FDS_ERR_NULL_ARG",
+        "FDS_ERR_NO_OPEN_RECORDS",
+        "FDS_ERR_NO_SPACE_IN_FLASH",
+        "FDS_ERR_NO_SPACE_IN_QUEUES",
+        "FDS_ERR_RECORD_TOO_LARGE",
+        "FDS_ERR_NOT_FOUND",
+        "FDS_ERR_NO_PAGES",
+        "FDS_ERR_USER_LIMIT_REACHED",
+        "FDS_ERR_CRC_CHECK_FAILED",
+        "FDS_ERR_BUSY",
+        "FDS_ERR_INTERNAL",
+    };
+
+    return err_str[ret - NRF_ERROR_FDS_ERR_BASE];
+}
+
+
+static void fds_evt_handler(fds_evt_t const * p_evt)
+{
+    if (p_evt->result == NRF_SUCCESS) {
+        NRF_LOG_INFO("Event: %s received (NRF_SUCCESS)", fds_evt_str[p_evt->id]);
+    } else {
+        NRF_LOG_INFO("Event: %s received (%s)", fds_evt_str[p_evt->id], fds_err_str(p_evt->result));
+    }
+
+    switch (p_evt->id) {
+        case FDS_EVT_INIT:
+            if (p_evt->result == NRF_SUCCESS) {
+                m_fds_initialized = true;
+            }
+            break;
+
+        case FDS_EVT_WRITE:
+            if (p_evt->result == NRF_SUCCESS)
+            {
+                NRF_LOG_INFO("Record ID:\t0x%04x",  p_evt->write.record_id);
+                NRF_LOG_INFO("File ID:\t0x%04x",    p_evt->write.file_id);
+                NRF_LOG_INFO("Record key:\t0x%04x", p_evt->write.record_key);
+            }
+            break;
+
+        case FDS_EVT_DEL_RECORD:
+            if (p_evt->result == NRF_SUCCESS)
+            {
+                NRF_LOG_INFO("Record ID:\t0x%04x",  p_evt->del.record_id);
+                NRF_LOG_INFO("File ID:\t0x%04x",    p_evt->del.file_id);
+                NRF_LOG_INFO("Record key:\t0x%04x", p_evt->del.record_key);
+            }
+            // m_delete_all.pending = false;
+            break;
+
+        default:
+            break;
+    }
+}
+
+void persist_config() {
+    fds_record_t        record;
+    fds_record_desc_t desc = {0};
+
+    record.file_id = CONFIG_FILE;
+    record.key = CONFIG_REC_KEY;
+    record.data.p_data = &ccpeed_cfg;
+    record.data.length_words = (sizeof(ccpeed_cfg_t) + 3) / 4;
+
+    NRF_LOG_INFO("Writing %s", (char *) record.data.p_data);
+    ret_code_t err_code = fds_record_write(&desc, &record);
+    APP_ERROR_CHECK(err_code);
+}
+
+void read_config() {
+    ret_code_t err_code;
+    fds_record_desc_t desc = {0};
+    fds_find_token_t  tok  = {0};
+    fds_flash_record_t config = {0};
+    bool found = false;
+
+
+    // Data is stored as a linked list of entries.  We need the last one that matches our File and Key combo.
+    while ((err_code = fds_record_find(CONFIG_FILE, CONFIG_REC_KEY, &desc, &tok)) == NRF_SUCCESS) {
+        /* Open the record and read its contents. */
+        err_code = fds_record_open(&desc, &config);
+        APP_ERROR_CHECK(err_code);
+
+        /* Copy the configuration from flash into ccpeed_cfg. */
+        memcpy(&ccpeed_cfg, config.p_data, sizeof(ccpeed_cfg_t));
+        /* Close the record when done reading. */
+        err_code = fds_record_close(&desc);
+        APP_ERROR_CHECK(err_code);
+        found = true;
+    } 
+    
+    if (found) {
+        NRF_LOG_INFO("Config file found - Value is %s (record id %d)", (char *) config.p_data, desc.record_id);
+    } else {
+        /* System config not found; write a new one. */
+        NRF_LOG_INFO("Writing config file with defaults");
+        persist_config();
+    }
+}
+
 /**@brief Function for handling write events to the LED characteristic.
  *
- * @param[in] p_tmps     Instance of LED Button Service to which the write applies.
+ * @param[in] p_tmps     Instance of Temperature Service to which the write applies.
  * @param[in] led_state Written/desired state of the LED.
  */
 static void sample_period_write_handler(uint16_t conn_handle, ble_tmps_t * p_tmps, uint8_t sample_period)
 {
     NRF_LOG_INFO("Sample period set to %d", sample_period);
+    ccpeed_cfg.sampling_period = sample_period;
+    persist_config();
 }
+
+
+static void name_write_handler(uint16_t conn_handle, ble_tmps_t * p_tmps, const char * new_name, size_t len)
+{
+    memcpy(ccpeed_cfg.device_name, new_name, len);
+    ccpeed_cfg.device_name[len] = 0;
+
+    NRF_LOG_INFO("Device Name set to %s ", ccpeed_cfg.device_name);
+
+    // Because we have changed the device name, reset the GAP parameters.
+    gap_params_init();
+    persist_config();
+}
+
 
 
 /**@brief Function for initializing services that will be used by the application.
@@ -287,19 +544,63 @@ static void sample_period_write_handler(uint16_t conn_handle, ble_tmps_t * p_tmp
 static void services_init(void)
 {
     ret_code_t         err_code;
-    ble_tmps_init_t     init     = {0};
     nrf_ble_qwr_init_t qwr_init = {0};
+    ble_tmps_init_t    tmps_init = {0};
+    ble_bas_init_t     bas_init = {0};
+    ble_dis_init_t     dis_init = {0};
 
     // Initialize Queued Write Module.
     qwr_init.error_handler = nrf_qwr_error_handler;
 
-    err_code = nrf_ble_qwr_init(&m_qwr, &qwr_init);
+
+    for (uint32_t i = 0; i < LINK_TOTAL; i++) {
+        err_code = nrf_ble_qwr_init(&m_qwr[i], &qwr_init);
+        APP_ERROR_CHECK(err_code);
+    }
+
+
+    // Initialize Battery Service.
+    memset(&bas_init, 0, sizeof(bas_init));
+
+    // Here the sec level for the Battery Service can be changed/increased.
+    bas_init.bl_rd_sec        = SEC_OPEN;
+    bas_init.bl_cccd_wr_sec   = SEC_OPEN;
+    bas_init.bl_report_rd_sec = SEC_OPEN;
+
+    bas_init.evt_handler          = NULL;
+    bas_init.support_notification = true;
+    bas_init.p_report_ref         = NULL;
+    bas_init.initial_batt_level   = 100;
+
+    err_code = ble_bas_init(&m_bas, &bas_init);
+    APP_ERROR_CHECK(err_code);
+
+    // Initialize Device Information Service.
+    memset(&dis_init, 0, sizeof(dis_init));
+    ble_srv_ascii_to_utf8(&dis_init.manufact_name_str, MANUFACTURER_NAME);
+    ble_srv_ascii_to_utf8(&dis_init.model_num_str, MODEL_NUM);
+    ble_srv_ascii_to_utf8(&dis_init.fw_rev_str, BUILD_NUM);
+
+    char hw_rev[128];
+    uint8_t *p = (uint8_t *) &(NRF_FICR->INFO.VARIANT);
+    snprintf(hw_rev, sizeof(hw_rev), "nRF%lx Var: %c%c%c%c, RAM: %ldKB, FLASH: %ldKB", NRF_FICR->INFO.PART, p[3], p[2], p[1], p[0], NRF_FICR->INFO.RAM, NRF_FICR->INFO.FLASH);
+    ble_srv_ascii_to_utf8(&dis_init.hw_rev_str, hw_rev);
+
+
+    char serial_num[128];
+    snprintf(serial_num, sizeof(serial_num), "%08" PRIx32 "%08" PRIx32, NRF_FICR->DEVICEID[0], NRF_FICR->DEVICEID[1]);
+    ble_srv_ascii_to_utf8(&dis_init.serial_num_str, serial_num);
+    dis_init.dis_char_rd_sec = SEC_OPEN;
+
+    err_code = ble_dis_init(&dis_init);
     APP_ERROR_CHECK(err_code);
 
     // Initialize TMPS.
-    init.sample_period_write_handler = sample_period_write_handler;
-
-    err_code = ble_tmps_init(&m_tmps, &init);
+    tmps_init.sample_period_write_handler = sample_period_write_handler;
+    tmps_init.name_write_handler = name_write_handler;
+    tmps_init.name_init = ccpeed_cfg.device_name;
+    tmps_init.sample_period_init = ccpeed_cfg.sampling_period;
+    err_code = ble_tmps_init(&m_tmps, &tmps_init);
     APP_ERROR_CHECK(err_code);
 }
 
@@ -321,7 +622,7 @@ static void on_conn_params_evt(ble_conn_params_evt_t * p_evt)
 
     if (p_evt->evt_type == BLE_CONN_PARAMS_EVT_FAILED)
     {
-        err_code = sd_ble_gap_disconnect(m_conn_handle, BLE_HCI_CONN_INTERVAL_UNACCEPTABLE);
+        err_code = sd_ble_gap_disconnect(p_evt->conn_handle, BLE_HCI_CONN_INTERVAL_UNACCEPTABLE);
         APP_ERROR_CHECK(err_code);
     }
 }
@@ -373,6 +674,79 @@ static void advertising_start(void)
 }
 
 
+
+
+/**@brief Function for handling the Connected event.
+ *
+ * @param[in] p_gap_evt GAP event received from the BLE stack.
+ */
+static void on_connected(const ble_gap_evt_t * const p_gap_evt)
+{
+    ret_code_t  err_code;
+    uint32_t    periph_link_cnt = ble_conn_state_peripheral_conn_count(); // Number of peripheral links.
+
+    NRF_LOG_INFO("Connection with link 0x%x established.", p_gap_evt->conn_handle);
+
+    // Assign connection handle to available instance of QWR module.
+    for (uint32_t i = 0; i < NRF_SDH_BLE_PERIPHERAL_LINK_COUNT; i++)
+    {
+        if (m_qwr[i].conn_handle == BLE_CONN_HANDLE_INVALID)
+        {
+            err_code = nrf_ble_qwr_conn_handle_assign(&m_qwr[i], p_gap_evt->conn_handle);
+            APP_ERROR_CHECK(err_code);
+            break;
+        }
+    }
+
+    err_code = app_timer_start(m_connected_timer_id, TIMER_DURATION, NULL);
+    APP_ERROR_CHECK(err_code);
+
+    // Update LEDs
+    bsp_board_led_on(CONNECTED_LED);
+    if (periph_link_cnt == NRF_SDH_BLE_PERIPHERAL_LINK_COUNT)
+    {
+        bsp_board_led_off(ADVERTISING_LED);
+    }
+    else
+    {
+        // Continue advertising. More connections can be established because the maximum link count has not been reached.
+        advertising_start();
+    }
+}
+
+
+/**@brief Function for handling the Disconnected event.
+ *
+ * @param[in] p_gap_evt GAP event received from the BLE stack.
+ */
+static void on_disconnected(ble_gap_evt_t const * const p_gap_evt)
+{
+    ret_code_t  err_code;
+    uint32_t    periph_link_cnt = ble_conn_state_peripheral_conn_count(); // Number of peripheral links.
+
+    NRF_LOG_INFO("Connection 0x%x has been disconnected. Reason: 0x%X",
+                 p_gap_evt->conn_handle,
+                 p_gap_evt->params.disconnected.reason);
+
+    if (periph_link_cnt == 0) {
+        bsp_board_led_off(CONNECTED_LED);
+
+        // Stop the timer.
+        bsp_board_led_off(TIMER_LED);
+        err_code = app_timer_stop(m_connected_timer_id);
+        APP_ERROR_CHECK(err_code);
+
+    }
+
+    if (periph_link_cnt == (NRF_SDH_BLE_PERIPHERAL_LINK_COUNT - 1)) {
+        // Advertising is not running when all connections are taken, and must therefore be started.
+        advertising_start();
+    }
+}
+
+
+
+
 /**@brief Function for handling BLE events.
  *
  * @param[in]   p_ble_evt   Bluetooth stack event.
@@ -385,32 +759,17 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
     switch (p_ble_evt->header.evt_id)
     {
         case BLE_GAP_EVT_CONNECTED:
-            NRF_LOG_INFO("Connected");
-            bsp_board_led_on(CONNECTED_LED);
-            bsp_board_led_off(ADVERTISING_LED);
-            m_conn_handle = p_ble_evt->evt.gap_evt.conn_handle;
-            err_code = nrf_ble_qwr_conn_handle_assign(&m_qwr, m_conn_handle);
-            APP_ERROR_CHECK(err_code);
-
-            err_code = app_timer_start(m_connected_timer_id, TIMER_DURATION, NULL);
-            APP_ERROR_CHECK(err_code);
+            on_connected(&p_ble_evt->evt.gap_evt);
             break;
 
         case BLE_GAP_EVT_DISCONNECTED:
-            NRF_LOG_INFO("Disconnected");
-            bsp_board_led_off(CONNECTED_LED);
-            m_conn_handle = BLE_CONN_HANDLE_INVALID;
-            advertising_start();
-
-            // Stop the timer.
-            bsp_board_led_off(TIMER_LED);
-            err_code = app_timer_stop(m_connected_timer_id);
-            APP_ERROR_CHECK(err_code);
+            on_disconnected(&p_ble_evt->evt.gap_evt);
+            
             break;
 
         case BLE_GAP_EVT_SEC_PARAMS_REQUEST:
             // Pairing not supported
-            err_code = sd_ble_gap_sec_params_reply(m_conn_handle,
+            err_code = sd_ble_gap_sec_params_reply(p_ble_evt->evt.gap_evt.conn_handle,
                                                    BLE_GAP_SEC_STATUS_PAIRING_NOT_SUPP,
                                                    NULL,
                                                    NULL);
@@ -431,7 +790,7 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
 
         case BLE_GATTS_EVT_SYS_ATTR_MISSING:
             // No system attributes have been stored.
-            err_code = sd_ble_gatts_sys_attr_set(m_conn_handle, NULL, 0, 0);
+            err_code = sd_ble_gatts_sys_attr_set(p_ble_evt->evt.gap_evt.conn_handle, NULL, 0, 0);
             APP_ERROR_CHECK(err_code);
             break;
 
@@ -514,15 +873,37 @@ static void idle_state_handle(void) {
     }
 }
 
+/** @brief Wait for fds to initialize. */
+static void wait_for_fds_ready(void)
+{
+    while (!m_fds_initialized)
+    {
+        idle_state_handle();
+    }
+}
+
 
 /**@brief Function for application main entry.
  */
 int main(void) {
     // Initialize.
     log_init();
+    power_management_init();
+
+
+    (void) fds_register(fds_evt_handler);
+    ret_code_t err_code =  fds_init();
+    APP_ERROR_CHECK(err_code);
+
+    wait_for_fds_ready();
+
+
+    read_config();
+    NRF_LOG_INFO("device name is %s. Sampling period is %d", ccpeed_cfg.device_name, ccpeed_cfg.sampling_period);
+
+
     leds_init();
     timers_init();
-    power_management_init();
     ble_stack_init();
     gap_params_init();
     gatt_init();
@@ -530,6 +911,9 @@ int main(void) {
     advertising_init();
     conn_params_init();
     tmp11x_init(temperature_callback);
+
+
+    application_timers_start();
 
     // Start execution.
     NRF_LOG_INFO("Temp sensor started.");

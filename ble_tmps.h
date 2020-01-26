@@ -56,31 +56,38 @@ NRF_SDH_BLE_OBSERVER(_name ## _obs,                                             
 
                               
 #define TMPS_UUID_BASE        {0x22, 0xa9, 0xc7, 0xe1, 0x84, 0xd2, 0x4a, 0x0a, 0x8e, 0xca, 0x2c, 0x32, 0x00, 0x00, 0x00, 0x00}
-#define TMPS_UUID_SERVICE               0x1523
-#define TMPS_UUID_TEMP_CHAR             0x1524
-#define TMPS_UUID_SAMPLE_PERIOD_CHAR    0x1525
+#define TMPS_UUID_SERVICE               0x7E77
+#define TMPS_UUID_TEMP_CHAR             0x7E78
+#define TMPS_UUID_SAMPLE_PERIOD_CHAR    0x7E79
+#define TMPS_UUID_LABEL_CHAR            0x7E80
 
 
 // Forward declaration of the ble_tmps_t type.
 typedef struct ble_tmps_s ble_tmps_t;
 
 typedef void (*ble_tmps_sample_period_write_handler_t) (uint16_t conn_handle, ble_tmps_t * p_tmps, uint8_t new_state);
+typedef void (*ble_tmps_name_write_handler_t) (uint16_t conn_handle, ble_tmps_t * p_tmps, const char *new_name, size_t len);
 
 /** @brief LED Temperature Service init structure. This structure contains all options and data needed for
  *        initialization of the service.*/
 typedef struct
 {
     ble_tmps_sample_period_write_handler_t sample_period_write_handler; /**< Event handler to be called when the config Characteristic is written. */
+    ble_tmps_name_write_handler_t name_write_handler; 
+    uint8_t sample_period_init;
+    char *name_init;
 } ble_tmps_init_t;
 
 /**@brief LED Temperature Service structure. This structure contains various status information for the service. */
 struct ble_tmps_s
 {
-    uint16_t                    service_handle;      /**< Handle of LED Temperature Service (as provided by the BLE stack). */
-    ble_gatts_char_handles_t    led_char_handles;    /**< Handles related to the LED Characteristic. */
-    ble_gatts_char_handles_t    button_char_handles; /**< Handles related to the Temperature Characteristic. */
-    uint8_t                     uuid_type;           /**< UUID type for the LED Temperature Service. */
+    uint16_t                    service_handle;                /**< Handle of LED Temperature Service (as provided by the BLE stack). */
+    ble_gatts_char_handles_t    sample_period_char_handles;    /**< Handles related to the LED Characteristic. */
+    ble_gatts_char_handles_t    temp_char_handles;             /**< Handles related to the Temperature Characteristic. */
+    ble_gatts_char_handles_t    device_name_char_handles;      /**< Handles related to the Temperature Characteristic. */
+    uint8_t                     uuid_type;                     /**< UUID type for the LED Temperature Service. */
     ble_tmps_sample_period_write_handler_t sample_period_write_handler;   /**< Event handler to be called when the config Characteristic is written. */
+    ble_tmps_name_write_handler_t name_write_handler; 
 };
 
 
