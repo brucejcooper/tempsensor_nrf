@@ -293,7 +293,11 @@ static void advertising_init(void)
     ble_advdata_t advdata;
     ble_advdata_t srdata;
 
-    ble_uuid_t adv_uuids[] = {{TMPS_UUID_SERVICE, m_tmps.uuid_type}};
+    ble_uuid_t adv_uuids[] = {
+        {TMPS_UUID_SERVICE, m_tmps.uuid_type},
+        {BLE_UUID_DEVICE_INFORMATION_SERVICE, BLE_UUID_TYPE_BLE},
+        {BLE_UUID_BATTERY_SERVICE, BLE_UUID_TYPE_BLE},
+    };
 
     // Build and set advertising data.
     memset(&advdata, 0, sizeof(advdata));
